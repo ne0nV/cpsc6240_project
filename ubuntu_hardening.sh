@@ -8,6 +8,32 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
+# Update and Upgrade the System
+echo "Updating and Upgrading the System..."
+apt-get update && apt-get upgrade -y
+apt-get dist-upgrade -y
+apt-get autoremove -y
+
+# Install Essential Security Packages
+echo "Installing essential security packages..."
+apt-get install -y unattended-upgrades fail2ban ufw
+
+# Enable and Configure Firewall
+echo "Configuring UFW (Uncomplicated Firewall)..."
+ufw enable
+ufw default deny incoming
+ufw default allow outgoing
+# Add additional rules as needed, e.g., ufw allow ssh
+
+# Configure Automatic Security Updates
+echo "Configuring automatic security updates..."
+cat > /etc/apt/apt.conf.d/20auto-upgrades << EOF
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+
 # Function to manage sudo group members
 manage_sudo_users() {
     echo "Auditing sudo group members..."
@@ -60,33 +86,6 @@ set_default_umask() {
         echo "Default umask is already set to 077."
     fi
 }
-
-
-# Update and Upgrade the System
-echo "Updating and Upgrading the System..."
-apt-get update && apt-get upgrade -y
-apt-get dist-upgrade -y
-apt-get autoremove -y
-
-# Install Essential Security Packages
-echo "Installing essential security packages..."
-apt-get install -y unattended-upgrades fail2ban ufw
-
-# Enable and Configure Firewall
-echo "Configuring UFW (Uncomplicated Firewall)..."
-ufw enable
-ufw default deny incoming
-ufw default allow outgoing
-# Add additional rules as needed, e.g., ufw allow ssh
-
-# Configure Automatic Security Updates
-echo "Configuring automatic security updates..."
-cat > /etc/apt/apt.conf.d/20auto-upgrades << EOF
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Download-Upgradeable-Packages "1";
-APT::Periodic::AutocleanInterval "7";
-APT::Periodic::Unattended-Upgrade "1";
-EOF
 
 # Harden SSH Access
 harden_ssh() {
@@ -167,11 +166,6 @@ echo "set superusers=\"root\"" >> /etc/grub.d/40_custom
 echo "password_pbkdf2 root $GRUB_HASH" >> /etc/grub.d/40_custom
 update-grub
 
-# Apply SSH Hardening
-harden_ssh
-
-
-
 # Secure PAM Configuration
 secure_pam() {
     echo "Securing PAM..."
@@ -183,12 +177,6 @@ secure_pam() {
 
     # Other PAM security measures can be added here
 }
-
-# Apply PAM Hardening
-secure_pam
-
-#Apply Blank/Null Password Check
-check_blank_passwords
 
 # Check for Blank or Null Passwords
 check_blank_passwords() {
@@ -222,5 +210,11 @@ check_and_modify_sudoers
 
 # Set Default Umask for All Users
 set_default_umask
+
+# Apply SSH Hardening
+harden_ssh
+
+# Apply PAM Hardening
+secure_pam
 
 echo "System hardening and basic administration tasks are complete."
