@@ -2,28 +2,44 @@
 
 # Enhanced Linux Hardening and Administration Script for Ubuntu LTS
 
+# Function to log actions
+log_action() {
+    echo "$(date) - $1" >> /var/log/ubuntu_hardening.log
+}
+
 # Ensure the script is run as root
 if [[ $EUID -ne 0 ]]; then
-   echo "This script must be run as root" 
+   echo "This script must be run as root"
+   log_action "Attempted to run script without root privileges"
    exit 1
 fi
 
 # Update and Upgrade the System
 echo "Updating and Upgrading the System..."
-apt-get update && apt-get upgrade -y
-apt-get dist-upgrade -y
-apt-get autoremove -y
+if apt-get update && apt-get upgrade -y && apt-get dist-upgrade -y && apt-get autoremove -y; then
+   log_action "System updated and upgraded"
+else
+   log_action "Failed to update and upgrade system"
+   exit 1
+fi
 
 # Install Essential Security Packages
 echo "Installing essential security packages..."
-apt-get install -y unattended-upgrades fail2ban ufw
+if apt-get install -y unattended-upgrades fail2ban ufw; then
+   log_action "Installed essential security packages"
+else
+   log_action "Failed to install essential security packages"
+   exit 1
+fi
 
 # Enable and Configure Firewall
 echo "Configuring UFW (Uncomplicated Firewall)..."
-ufw enable
-ufw default deny incoming
-ufw default allow outgoinga
-ufw logging on
+if ufw enable && ufw default deny incoming && ufw default allow outgoing && ufw logging on; then
+   log_action "Configured UFW"
+else
+   log_action "Failed to configure UFW"
+   exit 1
+fi
 # Add additional rules as needed, e.g., ufw allow ssh
 
 # Configure Automatic Security Updates
@@ -34,10 +50,12 @@ APT::Periodic::Download-Upgradeable-Packages "1";
 APT::Periodic::AutocleanInterval "7";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
+log_action "Configured automatic security updates"
 
 # Function to manage sudo group members
 manage_sudo_users() {
     echo "Auditing sudo group members..."
+    log_action "Auditing sudo group members"
     local users=$(getent group sudo | cut -d: -f4)
     local user_array=(${users//,/ })
     
@@ -45,10 +63,16 @@ manage_sudo_users() {
         echo "Do you want to keep $user in the sudo group? [y/N]"
         read -r response
         if [[ "$response" =~ ^([nN][oO]|[nN])$ ]]; then
-            deluser "$user" sudo
-            echo "$user removed from sudo group."
-        else
+            if deluser "$user" sudo; then
+               echo "$user removed from sudo group."
+               log_action "$user removed from sudo group"
+            else
+               echo "Failed to remove $user from sudo group."
+               log_action "Failed to remove $user from sudo group"
+            fi
+         else
             echo "$user kept in sudo group."
+            log_action "$user kept in sudo group"
         fi
     done
 }
@@ -56,22 +80,34 @@ manage_sudo_users() {
 # Function to check and modify sudoers file
 check_and_modify_sudoers() {
     echo "Verifying and modifying /etc/sudoers and /etc/sudoers.d..."
+    log_action "Checking /etc/sudoers and /etc/sudoers.d"
+
+    # Backup sudoers file
+   cp /etc/sudoers /etc/sudoers.backup
 
     # Check and modify /etc/sudoers
-    if grep -Eqs 'NOPASSWD|!authenticate' /etc/sudoers; then
+   if grep -Eqs 'NOPASSWD|!authenticate' /etc/sudoers; then
         echo "Found 'NOPASSWD' or '!authenticate' in /etc/sudoers. Removing..."
+        log_action "Found insecure entries in /etc/sudoers. Modifying..."
         sed -i '/NOPASSWD/d' /etc/sudoers
         sed -i '/!authenticate/d' /etc/sudoers
-    fi
+   else
+		echo "No insecure entries found in /etc/sudoers."
+  		log_action "No insecure entries in etc/sudoers"
+   fi
 
     # Check and modify files in /etc/sudoers.d
     for file in /etc/sudoers.d/*; do
         if grep -Eqs 'NOPASSWD|!authenticate' "$file"; then
             echo "Found 'NOPASSWD' or '!authenticate' in $file. Removing..."
+				log_action "Found insecure entries in /etc/sudoers.d. Modifying..."
             sed -i '/NOPASSWD/d' "$file"
             sed -i '/!authenticate/d' "$file"
-        fi
-    done
+			else
+				echo "No insecure entries found in /etc/sudoers.d"
+	    		log_action "No insecure entries in /etc/sudoers.d"
+		 	fi
+	 done
 }
 
 # Function to set default umask for all users
