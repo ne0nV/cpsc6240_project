@@ -22,7 +22,8 @@ apt-get install -y unattended-upgrades fail2ban ufw
 echo "Configuring UFW (Uncomplicated Firewall)..."
 ufw enable
 ufw default deny incoming
-ufw default allow outgoing
+ufw default allow outgoinga
+ufw logging on
 # Add additional rules as needed, e.g., ufw allow ssh
 
 # Configure Automatic Security Updates
@@ -87,6 +88,32 @@ set_default_umask() {
     fi
 }
 
+# Function to set automatic session termination after inactivity
+set_auto_logout() {
+    echo "Setting automatic logout for all users after 10 minutes of inactivity..."
+
+    # Checking and setting TMOUT in /etc/profile
+    if ! grep -q "TMOUT=" /etc/profile; then
+        echo "TMOUT=600" >> /etc/profile
+        echo "export TMOUT" >> /etc/profile
+    else
+        sed -i '/TMOUT=/c\TMOUT=600' /etc/profile
+    fi
+}
+
+# Function to install vlock if it is not installed
+install_vlock() {
+    echo "Checking for the vlock package..."
+
+    if ! dpkg -s vlock &>/dev/null; then
+        echo "vlock package is not installed. Installing..."
+        apt-get update
+        apt-get install -y vlock
+    else
+        echo "vlock package is already installed."
+    fi
+}
+
 # Harden SSH Access
 harden_ssh() {
     echo "Hardening SSH..."
@@ -148,10 +175,63 @@ replace_ftp
 echo "Disabling guest account..."
 sh -c 'printf "[Seat:*]\nallow-guest=false\n" >/etc/lightdm/lightdm.conf.d/50-no-guest.conf'
 
-# Log Auditing (Auditd)
-echo "Installing and configuring auditd..."
-apt-get install -y auditd
-# Configure as necessary
+configure_audit_rules() {
+    echo "Configuring audit system for monitoring the use of sensitive commands..."
+
+    # Check if auditd is installed
+    if ! dpkg -s auditd &>/dev/null; then
+        echo "auditd package is not installed. Installing..."
+        apt-get update
+        apt-get install -y auditd
+    fi
+    
+    # Function to add an audit rule if not already present
+    add_audit_rule() {
+        local rule="$1"
+        if ! grep -Fxq "$rule" /etc/audit/rules.d/audit.rules; then
+            echo "$rule" >> /etc/audit/rules.d/audit.rules
+        fi
+    }
+
+    # Audit rules for specified files and commands
+    add_audit_rule "-w /var/log/tallylog -p wa -k audit_tallylog"
+    add_audit_rule "-w /var/log/faillog -p wa -k audit_faillog"
+    add_audit_rule "-w /usr/bin/newgrp -p x -k audit_newgrp"
+    add_audit_rule "-w /usr/bin/chcon -p x -k audit_chcon"
+    add_audit_rule "-w /usr/bin/setfacl -p x -k audit_setfacl"
+    add_audit_rule "-w /usr/bin/passwd -p x -k audit_passwd"
+    add_audit_rule "-w /usr/sbin/unix_update -p x -k audit_unix_update"
+    add_audit_rule "-a always,exit -F arch=b64 -S delete_module -k audit_delete_module"
+    add_audit_rule "-a always,exit -F arch=b64 -S init_module,finit_module -k audit_module_management"
+    add_audit_rule "-w /usr/sbin/pam_timestamp_check -p x -k audit_pam_timestamp"
+    add_audit_rule "-w /usr/bin/crontab -p x -k audit_crontab"
+    add_audit_rule "-w /usr/sbin/usermod -p x -k audit_usermod"
+    add_audit_rule "-w /usr/sbin/change -p x -k audit_change"
+    add_audit_rule "-w /usr/bin/gpasswd -p x -k audit_gpasswd"
+    # Add other rules here as needed
+
+    # Restart auditd to apply changes
+    systemctl restart auditd
+    echo "Audit rules configured."
+}
+
+# Function to prevent direct root login
+prevent_direct_root_login() {
+    echo "Ensuring direct root login is disabled..."
+
+    # Disable direct root SSH login
+    if grep -q "^PermitRootLogin" /etc/ssh/sshd_config; then
+        sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+    else
+        echo "PermitRootLogin no" >> /etc/ssh/sshd_config
+    fi
+
+    # Disable root password
+    passwd -l root
+
+    systemctl restart sshd
+    echo "Direct root login has been disabled."
+}
 
 # Require Authentication on Single-User Mode
 echo "Configuring GRUB to require authentication for single-user mode..."
@@ -202,6 +282,139 @@ check_blank_passwords() {
     done
 }
 
+# Function to check and enable ASLR
+enable_aslr() {
+    echo "Checking if ASLR (Address Space Layout Randomization) is enabled..."
+
+    local aslr_status=$(cat /proc/sys/kernel/randomize_va_space)
+
+    if [ "$aslr_status" -eq 2 ]; then
+        echo "ASLR is already enabled."
+    else
+        echo "Enabling ASLR..."
+        echo 2 > /proc/sys/kernel/randomize_va_space
+        # Persist the setting
+        echo "kernel.randomize_va_space = 2" >> /etc/sysctl.conf
+    fi
+}
+
+# Function to enable non-executable memory protection
+enable_nx_protection() {
+    echo "Verifying non-executable memory protection..."
+
+    # Check if NX (No Execute) protection is enabled
+    if grep -q ' nx ' /proc/cpuinfo; then
+        echo "NX (No Execute) protection is enabled."
+    else
+        echo "NX (No Execute) protection is not enabled. Attempting to enable..."
+
+        # Attempt to enable NX protection via kernel parameters
+        if ! grep -q "noexec=off" /etc/default/grub; then
+            sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/&noexec=off /' /etc/default/grub
+            update-grub
+        fi
+
+        echo "NX protection attempt complete. Please reboot and verify changes."
+    fi
+}
+
+# Function to disable automatic USB mass storage mounting
+disable_usb_automatic_mounting() {
+    echo "Disabling automatic mounting of USB mass storage devices..."
+
+    local udev_rule_file="/etc/udev/rules.d/100-no-usb-automount.rules"
+
+    if [ ! -f "$udev_rule_file" ]; then
+        echo 'ACTION=="add", KERNEL=="sd[a-z][0-9]", SUBSYSTEM=="block", ENV{UDISKS_IGNORE}="1"' > "$udev_rule_file"
+        systemctl restart udev
+        echo "Automatic USB mounting has been disabled."
+    else
+        echo "Automatic USB mounting is already disabled."
+    fi
+}
+
+# Function to enforce a minimum 15-character password length
+enforce_min_password_length() {
+    echo "Enforcing a minimum 15-character password length..."
+
+    if ! grep -q "minlen=15" /etc/pam.d/common-password; then
+        # Ensure pwquality is installed and used
+        apt-get install -y libpam-pwquality
+
+        # Add or update the minlen parameter
+        sed -i '/pam_pwquality.so/ s/minlen=[0-9]\+/minlen=15/' /etc/pam.d/common-password
+        if ! grep -q "minlen=15" /etc/pam.d/common-password; then
+            sed -i '/pam_pwquality.so/ s/$/ minlen=15/' /etc/pam.d/common-password
+        fi
+        echo "Minimum password length policy updated."
+    else
+        echo "Minimum password length of 15 characters is already enforced."
+    fi
+}
+
+# Function to ensure pwquality is used for password management
+enforce_pwquality() {
+    echo "Ensuring pwquality is used for password management..."
+
+    # Install pwquality if not already installed
+    if ! dpkg -s libpam-pwquality &>/dev/null; then
+        apt-get update
+        apt-get install -y libpam-pwquality
+    fi
+
+    # Check and configure pam_pwquality
+    if ! grep -q "pam_pwquality.so" /etc/pam.d/common-password; then
+        # Insert pwquality line before the first password-related module
+        sed -i '/password\s\+requisite\s\+pam_pwquality.so/!b;n;cpassword\trequisite\tpam_pwquality.so retry=3' /etc/pam.d/common-password
+        echo "pwquality has been configured in PAM."
+    else
+        echo "pwquality is already configured in PAM."
+    fi
+}
+
+# Function to disable accounts after 35 days of inactivity
+disable_inactive_accounts() {
+    echo "Disabling accounts inactive for more than 35 days..."
+
+    # Iterate over each user
+    while IFS=: read -r username _ _ last_login _; do
+        # Skip if last login is not available
+        if [ -z "$last_login" ] || [ "$last_login" = "never" ]; then
+            continue
+        fi
+
+        # Calculate days since last login
+        last_login_epoch=$(date -d "$last_login" +%s)
+        current_epoch=$(date +%s)
+        diff=$(( (current_epoch - last_login_epoch) / 86400 ))
+
+        # Disable account if inactive for more than 35 days
+        if [ "$diff" -gt 35 ]; then
+            echo "Disabling user $username due to inactivity for $diff days."
+            usermod --lock "$username"
+        fi
+    done < <(lastlog | awk '{print $1, $4, $5, $6}')
+}
+
+# Function to ensure secure hashing for stored passwords
+ensure_secure_password_hashing() {
+    echo "Ensuring all stored passwords are encrypted with a secure cryptographic hashing algorithm..."
+
+    # Configure to use SHA-512 for password hashing
+    if ! grep -q "password.*pam_unix.so.*sha512" /etc/pam.d/common-password; then
+        sed -i '/password.*pam_unix.so/ s/$/ sha512/' /etc/pam.d/common-password
+        echo "SHA-512 configured for password hashing."
+    else
+        echo "SHA-512 is already configured for password hashing."
+    fi
+}
+
+# Check for auditd and configure audit rules
+configure_audit_rules
+
+# Prevent Direct Root Login
+prevent_direct_root_login
+
 # Apply Blank/Null Password Check
 check_blank_passwords
 
@@ -211,10 +424,37 @@ check_and_modify_sudoers
 # Set Default Umask for All Users
 set_default_umask
 
+# Set Automatic Logout After Inactivity
+set_auto_logout
+
+# Install vlock if not present
+install_vlock
+
 # Apply SSH Hardening
 harden_ssh
 
 # Apply PAM Hardening
 secure_pam
 
-echo "System hardening and basic administration tasks are complete."
+# Enable ASLR
+enable_aslr
+
+# Enable Non-Executable Memory Protection
+enable_nx_protection
+
+# Disable Automatic USB Mass Storage Mounting
+disable_usb_automatic_mounting
+
+# Enforce Minimum Password Length
+enforce_min_password_length
+
+# Enforce pwquality for Password Management
+enforce_pwquality
+
+# Disable Inactive Accounts
+disable_inactive_accounts
+
+# Ensure Secure Password Hashing
+ensure_secure_password_hashing
+
+echo "System hardening and administration tasks are complete."
